@@ -1,6 +1,4 @@
-import React, { useState, useEffect, useRef, createContext, useContext, FC } from 'react';
-// 注意：这里不再需要引入 CDN 脚本或 InjectStyles 组件。
-// 因为 Tailwind CSS 会通过本地构建工具（如 Create React App 的 Webpack）进行编译和加载。
+import React, { useState, useEffect, useRef, createContext, useContext, FC, useMemo } from 'react';
 
 // 定义时间账户的类型
 interface TimeAccounts {
@@ -12,6 +10,23 @@ interface Todo {
   id: string;
   text: string;
 }
+
+// 定义计时日志的类型
+// 定义计时日志的类型
+interface TimeLog {
+     id: string;
+     type: 'timer' | 'transfer'; // 新增：日志类型，区分计时和结转
+     timestamp: number; // 新增：记录操作发生的时间
+     // 计时日志特有字段
+     taskId?: string;
+     taskText?: string;
+     startTime?: number;
+     endTime?: number;
+     // 结转日志特有字段
+     fromAccount?: string;
+     toAccount?: string;
+     transferAmount?: number; // 结转的时间量（秒）
+  }
 
 // 定义上下文的类型
 interface TimeAccountsContextType {
@@ -28,13 +43,15 @@ const TimeAccountsContext = createContext<TimeAccountsContextType | null>(null);
 // 主要的应用组件
 const App: FC = () => {
   // 定义时间账户的状态
+  // "未分配时间"和"休息时间"现在是累积性的，记录时间投入到这些类别的总量。
   const [timeAccounts, setTimeAccounts] = useState<TimeAccounts>({
-    '未分配时间 (Unallocated)': 18000, // 初始时间来源，设置为5小时（5 * 3600秒）
-    '休息时间 (Rest Time)': 0,     // 番茄钟休息时间账户
+    '未分配时间 (Unallocated)': 0, // 初始为0，因为它会直接累加未指定待办的时间
+    '休息时间 (Rest Time)': 0,     // 初始为0，它会直接累加休息时间
     '学习会计 (Learn Accounting)': 0,
     '编写代码 (Coding Project)': 0,
     '阅读文档 (Reading Docs)': 0,
     '无效消耗 (Wasted Time)': 0,   // 时间损耗账户
+    '默认损失 (Default Loss)': 0, // 新增：因中断而产生的默认损失时间
     // 初始纪念碑子科目 (用户可自定义添加)
     '纪念碑 - 核心原型完成 (Core Proto Done)': 0,
   });
@@ -45,147 +62,315 @@ const App: FC = () => {
     { id: '编写代码 (Coding Project)', text: '开发复式记账法原型' },
     { id: '阅读文档 (Reading Docs)', text: '查阅 React 文档' },
   ]);
+  const [timeLogs, setTimeLogs] = useState<TimeLog[]>([]); // 新增：计时日志状态
+  const [isLoading, setIsLoading] = useState(true); // 新增：加载状态，防止初始状态覆盖本地存储
 
-  // 当前激活的任务ID
+  // **加载数据**
+  useEffect(() => {
+    try {
+      // 加载 Todos
+      const savedTodos = localStorage.getItem('todos');
+      if (savedTodos) {
+        setTodos(JSON.parse(savedTodos));
+      }
+
+      // 加载 Time Accounts
+      const savedTimeAccounts = localStorage.getItem('timeAccounts');
+      if (savedTimeAccounts) {
+        const parsedAccounts = JSON.parse(savedTimeAccounts);
+        setTimeAccounts(prevAccounts => ({
+          ...prevAccounts,
+          ...parsedAccounts
+        }));
+      }
+      
+      // 加载 Time Logs
+      const savedLogs = localStorage.getItem('timeLogs');
+      if (savedLogs) {
+        setTimeLogs(JSON.parse(savedLogs));
+      }
+    } catch (error) {
+      console.error("Failed to load data from local storage", error);
+    } finally {
+      // 所有加载完成后，设置 loading 为 false
+      setIsLoading(false);
+    }
+  }, []); // 空依赖数组，只在组件挂载时运行一次
+
+  // **保存数据**
+  useEffect(() => {
+    // 只有在加载完成后才开始保存，防止初始状态覆盖
+    if (!isLoading) {
+      try {
+        localStorage.setItem('todos', JSON.stringify(todos));
+        localStorage.setItem('timeAccounts', JSON.stringify(timeAccounts));
+        if (timeLogs.length > 0) {
+            localStorage.setItem('timeLogs', JSON.stringify(timeLogs));
+        }
+      } catch (error) {
+        console.error("Failed to save data to local storage", error);
+      }
+    }
+  }, [todos, timeAccounts, timeLogs, isLoading]); // 当任何数据改变且加载完成后触发
+
+  // 当前激活的任务ID (用于番茄钟将时间归类)
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   // 当前番茄钟状态：'idle', 'focus', 'break'
   const [pomodoroState, setPomodoroState] = useState<'idle' | 'focus' | 'break'>('idle');
   // 番茄钟剩余时间 (秒)
   const [pomodoroRemainingTime, setPomodoroRemainingTime] = useState<number>(0);
   // 番茄钟设置
-  const pomodoroSettings = {
+  const pomodoroSettings = useMemo(() => ({
     focusTime: 25 * 60, // 25 分钟专注
     breakTime: 5 * 60,  // 5 分钟休息
-  };
+  }), []); // 空依赖数组，确保对象引用稳定
+
+  // 用于"重新开始"时回溯时间：记录当前阶段开始时，相关账户的初始时间值
+  const initialTimeAtPhaseStartRef = useRef<number>(0);
+  // 用于"重新开始"时回溯时间：记录当前阶段开始时，对应的活跃任务ID
+  const activeTaskAtPhaseStartRef = useRef<string | null>(null);
+
+  const phaseStartTimeRef = useRef<number | null>(null); // 新增：记录当前阶段开始时间
 
   // 计时器ID
   const timerRef = useRef<NodeJS.Timeout | null>(null); // 明确计时器类型
+  
+  // 使用 ref 存储当前状态，确保计时器总是使用最新值
+  const currentPomodoroStateRef = useRef<'idle' | 'focus' | 'break'>(pomodoroState);
+  const currentActiveTaskIdRef = useRef<string | null>(activeTaskId);
+  
+  // 更新 ref 值
+  useEffect(() => {
+    currentPomodoroStateRef.current = pomodoroState;
+  }, [pomodoroState]);
+  
+  useEffect(() => {
+    currentActiveTaskIdRef.current = activeTaskId;
+  }, [activeTaskId]);
+
   // 显示指导模态框
   const [showOnboarding, setShowOnboarding] = useState<boolean>(false);
   // 每个时间单位的树木增长视觉效果
   const timeUnitForGrowth: number = 60; // 60秒 = 1分钟，用于树木增长的单位
 
   // 导航栏当前视图
-  const [currentView, setCurrentView] = useState<'timerTodo' | 'accountTransfer' | 'monuments' | 'settings'>('timerTodo'); // 默认为计时与待办界面
+  const [currentView, setCurrentView] = useState<'timerTodo' | 'accountTransfer' | 'monuments' | 'settings' | 'timeLog'>('timerTodo'); // 默认为计时与待办界面
 
-  // 计时器效果
+  // 计时器效果的核心逻辑 (每秒更新)
   useEffect(() => {
+    // 只有当有活跃任务且番茄钟不处于空闲状态时，才设置计时器
     if (activeTaskId && pomodoroState !== 'idle') {
-      // 每秒更新时间账户和番茄钟时间
+      console.log('Starting timer with:', { activeTaskId, pomodoroState });
+      
       timerRef.current = setInterval(() => {
-        setPomodoroRemainingTime((prevTime) => {
-          // 如果未分配时间不足，则停止计时器
-          if (timeAccounts['未分配时间 (Unallocated)'] <= 0 && prevTime > 0) {
-            if (timerRef.current) { // 清除计时器前检查是否存在
-              clearInterval(timerRef.current);
-            }
-            timerRef.current = null;
-            setPomodoroState('idle');
-            setActiveTaskId(null);
-            alert('未分配时间不足，请补充或结束计时。');
-            return 0;
+        // 时间累加逻辑
+        setTimeAccounts((prevAccounts) => {
+          const newAccounts = { ...prevAccounts };
+          if (currentPomodoroStateRef.current === 'focus') {
+            const targetAccount = currentActiveTaskIdRef.current || '未分配时间 (Unallocated)';
+            newAccounts[targetAccount] = (newAccounts[targetAccount] || 0) + 1;
+          } else if (currentPomodoroStateRef.current === 'break') {
+            newAccounts['休息时间 (Rest Time)'] = (newAccounts['休息时间 (Rest Time)'] || 0) + 1;
           }
+          return newAccounts;
+        });
 
+        // 计时器递减和阶段切换逻辑
+        setPomodoroRemainingTime((prevTime) => {
           if (prevTime <= 1) {
-            // 时间到，切换番茄钟状态
-            if (timerRef.current) { // 清除计时器前检查是否存在
-              clearInterval(timerRef.current);
-            }
-            timerRef.current = null;
+            // 时间耗尽，切换阶段
+            if (currentPomodoroStateRef.current === 'focus') {
+              const stopTime = Date.now();
+              if (currentActiveTaskIdRef.current && phaseStartTimeRef.current) {
+                    addTimeLogEntry({
+                       type: 'timer',
+                       taskId: currentActiveTaskIdRef.current,
+                       startTime: phaseStartTimeRef.current,
+                       endTime: stopTime,
+                    });
+                  }
 
-            if (pomodoroState === 'focus') {
-              // 专注时间结束，进入休息
+              phaseStartTimeRef.current = stopTime;
+
               setPomodoroState('break');
               setPomodoroRemainingTime(pomodoroSettings.breakTime);
               alert('专注时间结束！现在是休息时间。');
-            } else if (pomodoroState === 'break') {
-              // 休息时间结束，进入空闲
+            } else if (currentPomodoroStateRef.current === 'break') {
+              const stopTime = Date.now();
+              if (phaseStartTimeRef.current) {
+                if (phaseStartTimeRef.current) {
+                      addTimeLogEntry({
+                         type: 'timer',
+                         taskId: '休息时间 (Rest Time)',
+                         startTime: phaseStartTimeRef.current,
+                         endTime: stopTime,
+                      });
+                    }
+              }
+              phaseStartTimeRef.current = null;
+              
               setPomodoroState('idle');
               setPomodoroRemainingTime(0);
-              setActiveTaskId(null); // 休息结束后停止任务关联
+              setActiveTaskId(null);
+              activeTaskAtPhaseStartRef.current = null;
+              initialTimeAtPhaseStartRef.current = 0;
               alert('休息时间结束！准备开始下一个专注。');
             }
-            return 0; // Prevent negative time
-          } else {
-            // 时间递减，并更新对应账户
-            setTimeAccounts((prevAccounts) => {
-              const newAccounts = { ...prevAccounts };
-              // 从“未分配时间”贷出1秒，借入当前活跃账户1秒
-              newAccounts['未分配时间 (Unallocated)'] = Math.max(0, newAccounts['未分配时间 (Unallocated)'] - 1);
-              if (pomodoroState === 'focus') {
-                newAccounts[activeTaskId] = (newAccounts[activeTaskId] || 0) + 1;
-              } else if (pomodoroState === 'break') {
-                newAccounts['休息时间 (Rest Time)'] = (newAccounts['休息时间 (Rest Time)'] || 0) + 1;
-              }
-              return newAccounts;
-            });
-            return prevTime - 1;
+            
+            // 阶段切换后，当前计时器完成其使命，可以被清除
+            if (timerRef.current) {
+              clearInterval(timerRef.current);
+            }
+            return 0;
           }
+          return prevTime - 1;
         });
-      }, 1000); // 每秒更新
-    } else {
-      // 停止计时器
-      if (timerRef.current) { // 清除计时器前检查是否存在
-        clearInterval(timerRef.current);
-      }
+      }, 1000);
     }
 
-    // 清理函数：组件卸载时清除计时器
+    // 清理函数：这是此 effect 的核心。
+    // 它在组件卸载或依赖项 (activeTaskId, pomodoroState) 改变时运行
+    // 确保任何旧的计时器都被彻底清除
     return () => {
       if (timerRef.current) {
+        console.log('Cleaning up timer ID:', timerRef.current);
         clearInterval(timerRef.current);
+        timerRef.current = null;
       }
     };
-  }, [activeTaskId, pomodoroState, pomodoroRemainingTime, pomodoroSettings.focusTime, pomodoroSettings.breakTime, timeAccounts]); // 加上timeAccounts作为依赖，以便及时检查余额
+    
+  // 依赖项：只有当 activeTaskId 或 pomodoroState 改变时，才重新运行此 effect
+  }, [activeTaskId, pomodoroState]);
 
 
-  // 处理开始/停止番茄钟
+  // 处理开始番茄钟
   const handleStartPomodoro = (taskId: string) => {
-    // 如果已有活跃任务，先停止
-    if (activeTaskId && pomodoroState !== 'idle') {
-      handleStopPomodoro(); // 确保旧任务时间入账
+    // 如果已有活跃任务，先停止当前计时，避免时间混乱
+    if (currentActiveTaskIdRef.current && currentPomodoroStateRef.current !== 'idle') {
+      handleStopPomodoro(); // 确保旧的计时状态被清理
     }
 
-    setActiveTaskId(taskId); // 关联到具体任务或'未分配时间'
-    setPomodoroState('focus');
-    setPomodoroRemainingTime(pomodoroSettings.focusTime);
+    // 记录当前阶段开始时，活跃任务账户的初始时间值
+    // 这对于"重新开始"时计算损失非常重要
+    initialTimeAtPhaseStartRef.current = timeAccounts[taskId] || 0;
+    activeTaskAtPhaseStartRef.current = taskId; // 记录哪个任务开始了当前阶段
+    phaseStartTimeRef.current = Date.now(); // 记录日志的开始时间
+
+    setActiveTaskId(taskId); // 设置当前活跃任务
+    setPomodoroState('focus'); // 进入专注模式
+    setPomodoroRemainingTime(pomodoroSettings.focusTime); // 设置专注时间
   };
 
+  // 处理停止番茄钟（正常停止或切换任务）
   const handleStopPomodoro = () => {
-    // 停止当前番茄钟，并计算已用时间入账
+    // 清除计时器
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
 
-    // 这里的逻辑已经通过每秒更新处理，所以无需在停止时再次分配大量时间
-    // 仅需重置状态
+    const stopTime = Date.now();
+    const startTime = phaseStartTimeRef.current;
+    const taskToLog = currentActiveTaskIdRef.current;
+    const stateToLog = currentPomodoroStateRef.current;
+    
+    if (startTime && taskToLog) {
+            if (stateToLog === 'focus') {
+              addTimeLogEntry({
+                 type: 'timer',
+                 taskId: taskToLog,
+                 startTime,
+                 endTime: stopTime,
+              });
+            } else if (stateToLog === 'break') {
+              addTimeLogEntry({
+                 type: 'timer',
+                 taskId: '休息时间 (Rest Time)',
+                 startTime,
+                 endTime: stopTime,
+              });
+            }
+         }
+    phaseStartTimeRef.current = null;
+
+    // 重置番茄钟状态为初始空闲状态
+    setPomodoroState('idle');
+    setPomodoroRemainingTime(0);
+    setActiveTaskId(null); // 清除关联任务
+    activeTaskAtPhaseStartRef.current = null; // 清除阶段开始时的任务引用
+    initialTimeAtPhaseStartRef.current = 0;   // 重置初始时间
+  };
+
+  // 新增：快进当前阶段（用于调试或快速跳过当前阶段）
+  // 此时已累积的时间会保留在原账户
+  const handleFastForward = () => {
+    if (currentPomodoroStateRef.current !== 'idle') {
+      setPomodoroRemainingTime(1); // 将剩余时间设置为1秒，强制在下一次更新时触发阶段结束
+      // 注意：这里不需要额外操作 timeAccounts，因为每秒更新逻辑已经处理了累加。
+      // 阶段结束时，时间已经正确地累积在目标账户中。
+    }
+  };
+
+  // 新增：重新开始番茄钟（完全重置，已投入时间计入"默认损失"）
+  const handleRestartPomodoro = () => {
+    // 停止计时器
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+
+    // 获取当前阶段被中断的任务ID
+    const interruptedTask = activeTaskAtPhaseStartRef.current;
+    if (interruptedTask && (currentPomodoroStateRef.current === 'focus' || currentPomodoroStateRef.current === 'break')) {
+      // 计算从阶段开始到中断为止，已累积在该任务账户中的时间
+      // timeAccounts[interruptedTask] 是当前的总累积时间
+      // initialTimeAtPhaseStartRef.current 是该阶段开始时的账户时间
+      const timeAccumulatedInCurrentPhase = (timeAccounts[interruptedTask] || 0) - initialTimeAtPhaseStartRef.current;
+
+      if (timeAccumulatedInCurrentPhase > 0) {
+        setTimeAccounts((prevAccounts) => {
+          const newAccounts = { ...prevAccounts };
+
+          // 从原账户中扣除这些时间
+          newAccounts[interruptedTask] = Math.max(0, newAccounts[interruptedTask] - timeAccumulatedInCurrentPhase);
+
+          // 将这些时间转移到"默认损失"账户
+          newAccounts['默认损失 (Default Loss)'] = (newAccounts['默认损失 (Default Loss)'] || 0) + timeAccumulatedInCurrentPhase;
+          return newAccounts;
+        });
+        alert(`已将 ${formatTime(timeAccumulatedInCurrentPhase)} 计入"默认损失"账户。`);
+      }
+    }
+
+    // 重置番茄钟和任务状态
     setPomodoroState('idle');
     setPomodoroRemainingTime(0);
     setActiveTaskId(null);
+    activeTaskAtPhaseStartRef.current = null; // 清除阶段开始时的任务引用
+    initialTimeAtPhaseStartRef.current = 0;   // 重置初始时间
   };
 
   // 添加待办任务
   const addTodo = (text: string) => {
     const newId = `Todo-${Date.now()}`; // 为待办任务生成唯一ID
     setTodos([...todos, { id: newId, text }]);
-    setTimeAccounts((prevAccounts) => ({ ...prevAccounts, [newId]: 0 })); // 为新待办添加账户
+    setTimeAccounts((prevAccounts) => ({ ...prevAccounts, [newId]: 0 })); // 为新待办添加账户，初始时间为0
   };
 
   // 删除待办任务
   const deleteTodo = (id: string) => {
-    setTodos(todos.filter(todo => todo.id !== id));
+    setTodos(todos.filter(todo => todo.id !== id)); // 从待办列表中移除
     setTimeAccounts((prevAccounts) => {
       const newAccounts = { ...prevAccounts };
-      delete newAccounts[id]; // 删除对应账户
+      delete newAccounts[id]; // 从时间账户中删除对应账户
       return newAccounts;
     });
-    if (activeTaskId === id) {
+    if (currentActiveTaskIdRef.current === id) {
       handleStopPomodoro(); // 如果删除的是当前活跃任务，则停止计时
     }
   };
 
-  // 添加纪念碑子科目
+  // 添加纪念碑子科目（供 MonumentsView 调用）
   const addMonumentAccount = (name: string): boolean => {
     const monumentId = `纪念碑 - ${name}`;
     if (timeAccounts[monumentId] !== undefined) {
@@ -205,7 +390,7 @@ const App: FC = () => {
     return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // 确保上下文值不为空
+  // 确保上下文值不为空且稳定
   const contextValue = React.useMemo(() => ({
     timeAccounts,
     setTimeAccounts,
@@ -214,6 +399,64 @@ const App: FC = () => {
     addMonumentAccount
   }), [timeAccounts, formatTime, timeUnitForGrowth, addMonumentAccount]);
 
+  const addTimeLogEntry = (logDetails: {
+     type: 'timer';
+     taskId: string;
+     startTime: number;
+     endTime: number;
+   } | {
+     type: 'transfer';
+     fromAccount: string;
+     toAccount: string;
+     transferAmount: number;
+   }) => {
+     const baseLog: TimeLog = {
+        id: `log-${Date.now()}-${Math.random()}`,
+        timestamp: Date.now(), // 记录操作发生的精确时间
+        type: logDetails.type,
+     };
+
+     let newLog: TimeLog;
+
+     if (logDetails.type === 'timer') {
+        const { taskId, startTime, endTime } = logDetails;
+        if (!taskId || !startTime || !endTime || endTime <= startTime) {
+          console.warn("Invalid timer log entry attempted:", logDetails);
+          return;
+        }
+        const taskText = taskId.startsWith('Todo-')
+          ? todos.find(t => t.id === taskId)?.text || taskId
+          : taskId;
+
+        newLog = {
+          ...baseLog,
+          taskId,
+          taskText,
+          startTime,
+          endTime,
+        };
+     } else { // type === 'transfer'
+        const { fromAccount, toAccount, transferAmount } = logDetails;
+        if (!fromAccount || !toAccount || !transferAmount || transferAmount <= 0) {
+          console.warn("Invalid transfer log entry attempted:", logDetails);
+          return;
+        }
+        newLog = {
+          ...baseLog,
+          fromAccount,
+          toAccount,
+          transferAmount,
+        };
+     }
+     setTimeLogs(prevLogs => [...prevLogs, newLog]);
+   };
+
+  const clearTimeLogs = () => {
+    if (window.confirm('您确定要清除所有计时和结转日志吗？此操作无法撤销。')) {
+      setTimeLogs([]);
+      localStorage.removeItem('timeLogs');
+    }
+  };
 
   return (
     // 使用Context Provider包裹整个应用，以便子组件访问时间账户数据
@@ -251,6 +494,15 @@ const App: FC = () => {
             </li>
             <li>
               <button
+                onClick={() => setCurrentView('timeLog')}
+                className={`py-2 px-4 rounded-full transition duration-300 ease-in-out
+                  ${currentView === 'timeLog' ? 'bg-indigo-500' : 'hover:bg-indigo-600'}`}
+              >
+                计时日志
+              </button>
+            </li>
+            <li>
+              <button
                 onClick={() => setCurrentView('settings')}
                 className={`py-2 px-4 rounded-full transition duration-300 ease-in-out
                   ${currentView === 'settings' ? 'bg-indigo-500' : 'hover:bg-indigo-600'}`}
@@ -270,6 +522,8 @@ const App: FC = () => {
               pomodoroRemainingTime={pomodoroRemainingTime}
               onStartPomodoro={handleStartPomodoro}
               onStopPomodoro={handleStopPomodoro}
+              handleFastForward={handleFastForward} // 传递快进按钮的handler
+              handleRestartPomodoro={handleRestartPomodoro} // 传递重新开始按钮的handler
               todos={todos}
               addTodo={addTodo}
               deleteTodo={deleteTodo}
@@ -280,11 +534,22 @@ const App: FC = () => {
           {currentView === 'accountTransfer' && (
             <AccountTransferView
               allAccountNames={Object.keys(timeAccounts)}
+              todos={todos}
+              addTimeLogEntry={addTimeLogEntry} // 新增：传递 addTimeLogEntry 函数
             />
           )}
 
           {currentView === 'monuments' && (
             <MonumentsView />
+          )}
+
+          {currentView === 'timeLog' && (
+            <TimeLogView
+              timeLogs={timeLogs}
+              todos={todos}
+              formatTime={formatTime}
+              clearTimeLogs={clearTimeLogs}
+            />
           )}
 
           {currentView === 'settings' && (
@@ -312,6 +577,8 @@ interface TimerTodoViewProps {
   pomodoroRemainingTime: number;
   onStartPomodoro: (taskId: string) => void;
   onStopPomodoro: () => void;
+  handleFastForward: () => void; // 新增 prop
+  handleRestartPomodoro: () => void; // 新增 prop
   todos: Todo[];
   addTodo: (text: string) => void;
   deleteTodo: (id: string) => void;
@@ -324,6 +591,8 @@ const TimerTodoView: FC<TimerTodoViewProps> = ({
   pomodoroRemainingTime,
   onStartPomodoro,
   onStopPomodoro,
+  handleFastForward,
+  handleRestartPomodoro,
   todos,
   addTodo,
   deleteTodo,
@@ -386,6 +655,26 @@ const TimerTodoView: FC<TimerTodoViewProps> = ({
             </button>
           )}
         </div>
+
+        {/* 新增的控制按钮 */}
+        <div className="flex space-x-4 mb-4">
+          <button
+            onClick={handleFastForward}
+            disabled={pomodoroState === 'idle'}
+            className={`px-4 py-2 rounded-full text-sm font-semibold transition duration-300 ease-in-out
+              ${pomodoroState === 'idle' ? 'bg-gray-300 text-gray-600 cursor-not-allowed' : 'bg-yellow-500 text-white hover:bg-yellow-600'}`}
+          >
+            快进当前阶段
+          </button>
+          <button
+            onClick={handleRestartPomodoro}
+            className="px-4 py-2 bg-gray-500 text-white font-semibold rounded-full shadow-lg hover:bg-gray-600 transition duration-300 ease-in-out"
+          >
+            重新开始
+          </button>
+        </div>
+
+
         <button
           onClick={onboarding}
           className="px-4 py-2 text-indigo-600 hover:text-indigo-800 text-sm font-semibold rounded-lg transition duration-300 ease-in-out mt-4"
@@ -469,9 +758,21 @@ const TimerTodoView: FC<TimerTodoViewProps> = ({
 // 2. 科目结转界面
 interface AccountTransferViewProps {
   allAccountNames: string[];
+  todos: Todo[];
+  addTimeLogEntry: (logDetails: {
+    type: 'timer';
+    taskId: string;
+    startTime: number;
+    endTime: number;
+  } | {
+    type: 'transfer';
+    fromAccount: string;
+    toAccount: string;
+    transferAmount: number;
+  }) => void; // 新增：结转日志记录函数
 }
 
-const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames }) => {
+const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames, todos, addTimeLogEntry }) => {
   const context = useContext(TimeAccountsContext);
   if (!context) {
     throw new Error('AccountTransferView must be used within a TimeAccountsContext.Provider');
@@ -508,14 +809,20 @@ const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames }) 
 
     setTimeAccounts((prevAccounts) => {
       const newAccounts = { ...prevAccounts };
-      newAccounts[fromAccount] -= transferAmount; // 贷出
-      newAccounts[toAccount] = (newAccounts[toAccount] || 0) + transferAmount;   // 借入
+      newAccounts[fromAccount] -= transferAmount; // 贷出 (减少)
+      newAccounts[toAccount] = (newAccounts[toAccount] || 0) + transferAmount;   // 借入 (增加)
       return newAccounts;
     });
 
     // 更新 T 字表模拟数据
     setTAccountDebit([{ account: toAccount, amount: transferAmount }]);
     setTAccountCredit([{ account: fromAccount, amount: transferAmount }]);
+    addTimeLogEntry({
+            type: 'transfer',
+            fromAccount,
+            toAccount,
+            transferAmount,
+        });
 
     setMessage(`成功将 ${formatTime(transferAmount)} 从 ${fromAccount} 结转到 ${toAccount}。`);
     // 清空表单
@@ -570,23 +877,29 @@ const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames }) 
           当前账户余额
         </h3>
         <div className="space-y-3 overflow-y-auto max-h-64">
-          {Object.entries(timeAccounts).map(([accountName, time]) => (
-            <div
-              key={accountName}
-              className={`flex justify-between items-center p-2 rounded-lg
-                ${accountName.includes('未分配') ? 'bg-blue-50' : ''}
-                ${accountName.startsWith('纪念碑 -') ? 'bg-emerald-50' : ''}
-                ${accountName.includes('无效') ? 'bg-red-50' : ''}
-                ${accountName.includes('休息') ? 'bg-purple-50' : ''}
-                ${!accountName.includes('未分配') && !accountName.startsWith('纪念碑 -') && !accountName.includes('无效') && !accountName.includes('休息') ? 'bg-gray-50' : ''}
-              `}
-            >
-              <span className="font-medium text-gray-700">{accountName}:</span>
-              <span className="font-bold text-indigo-600">
-                {formatTime(time)}
-              </span>
-            </div>
-          ))}
+        {Object.entries(timeAccounts).map(([accountName, time]) => {
+               const displayedName = accountName.startsWith('Todo-')
+                  ? todos.find(t => t.id === accountName)?.text || accountName
+                  : accountName;
+               return (
+                  <div
+                    key={accountName}
+                    className={`flex justify-between items-center p-2 rounded-lg
+                       ${accountName.includes('未分配') ? 'bg-blue-50' : ''}
+                       ${accountName.startsWith('纪念碑 -') ? 'bg-emerald-50' : ''}
+                       ${accountName.includes('无效') ? 'bg-red-50' : ''}
+                       ${accountName.includes('休息') ? 'bg-purple-50' : ''}
+                       ${accountName.includes('默认损失') ? 'bg-red-100' : ''}
+                       ${!accountName.includes('未分配') && !accountName.startsWith('纪念碑 -') && !accountName.includes('无效') && !accountName.includes('休息') && !accountName.includes('默认损失') && !accountName.startsWith('Todo-') ? 'bg-gray-50' : ''}
+                    `}
+                  >
+                    <span className="font-medium text-gray-700">{displayedName}:</span>
+                    <span className="font-bold text-indigo-600">
+                       {formatTime(time)}
+                    </span>
+                  </div>
+               );
+             })}
         </div>
       </div>
 
@@ -596,7 +909,7 @@ const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames }) 
           执行时间结转
         </h2>
         <p className="text-sm text-gray-600 mb-4 text-center">
-          （例如：将“编写代码”的时间结转到“纪念碑 - 核心原型完成”）
+          （例如：将"编写代码"的时间结转到"纪念碑 - 核心原型完成"）
         </p>
         <div className="space-y-4 flex-grow">
           <div>
@@ -610,16 +923,22 @@ const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames }) 
               className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
             >
               <option value="">选择账户</option>
-              {allAccountNames.filter(name =>
-                !name.startsWith('纪念碑 -') &&
-                !name.includes('未分配') &&
-                !name.includes('休息时间') &&
-                !name.includes('无效消耗')
-              ).map((name) => (
-                <option key={name} value={name}>
-                  {name} (当前: {formatTime(timeAccounts[name])})
-                </option>
-              ))}
+              {allAccountNames
+                    .filter(name =>
+                       !name.startsWith('纪念碑 -') &&
+                       !name.includes('休息时间') &&
+                       !name.includes('默认损失')
+                    )
+                    .map((name) => {
+                       const displayedName = name.startsWith('Todo-')
+                         ? todos.find(t => t.id === name)?.text || name
+                         : name;
+                       return (
+                         <option key={name} value={name}>
+                            {displayedName} (当前: {formatTime(timeAccounts[name])})
+                         </option>
+                       );
+                    })}
             </select>
           </div>
           <div>
@@ -633,15 +952,23 @@ const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames }) 
               className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
             >
               <option value="">选择账户</option>
-              {allAccountNames.filter(name =>
-                !name.includes('未分配') &&
-                !name.includes('休息时间') &&
-                !name.includes('无效消耗')
-              ).map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
+              {allAccountNames
+                    .filter(name =>
+                       !name.includes('未分配') &&
+                       !name.includes('休息时间') &&
+                       !name.includes('无效消耗') &&
+                       !name.includes('默认损失')
+                    )
+                    .map((name) => {
+                       const displayedName = name.startsWith('Todo-')
+                         ? todos.find(t => t.id === name)?.text || name
+                         : name;
+                       return (
+                         <option key={name} value={name}>
+                            {displayedName}
+                         </option>
+                       );
+                    })}
             </select>
           </div>
           <div>
@@ -709,7 +1036,7 @@ const MonumentsView: FC = () => {
         我的纪念碑
       </h2>
       <p className="text-lg text-gray-700 mb-6 text-center">
-        “纪念碑”是您所有投入时间最终转化为的回报或成就的集合。您可以自定义不同的纪念碑来反映您的产出。
+        "纪念碑"是您所有投入时间最终转化为的回报或成就的集合。您可以自定义不同的纪念碑来反映您的产出。
       </p>
 
       {/* 添加新的纪念碑子科目 */}
@@ -874,8 +1201,9 @@ const TreeDisplay: FC<TreeDisplayProps> = ({ taskId }) => {
   const leavesColor = `hsl(${Math.min(120, treeSize * 2)}, 70%, 50%)`; // 颜色随大小变化
 
   // 检查 taskId 是否存在于 timeAccounts 中，因为待办任务可能被删除
-  if (timeSpent === undefined || taskId.includes('未分配') || taskId.includes('休息') || taskId.startsWith('纪念碑 -') || taskId.includes('无效')) {
-      return null; // 不为这些特殊账户或纪念碑子科目显示树木
+  // 不为这些特殊账户或纪念碑子科目显示树木
+  if (timeSpent === undefined || taskId.includes('未分配') || taskId.includes('休息') || taskId.startsWith('纪念碑 -') || taskId.includes('无效') || taskId.includes('默认损失')) {
+      return null; // 新增过滤"默认损失"账户
   }
 
   return (
@@ -912,7 +1240,7 @@ interface OnboardingModalProps {
   onClose: () => void;
 }
 
-// 指导模态框
+// 指导模态框组件 (在真实项目中应独立为单独文件，便于非技术人员编辑内容)
 const OnboardingModal: FC<OnboardingModalProps> = ({ onClose }) => {
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
@@ -921,30 +1249,31 @@ const OnboardingModal: FC<OnboardingModalProps> = ({ onClose }) => {
           时间复式记账法：工作原理
         </h2>
         <p className="text-gray-700 mb-4 leading-relaxed">
-          想象一下，您的时间是您最宝贵的资产。就像会计中的资金一样，时间可以被“记账”和“流转”。
+          想象一下，您的时间是您最宝贵的资产。就像会计中的资金一样，时间可以被"记账"和"流转"。
         </p>
         <h3 className="text-xl font-semibold text-gray-800 mb-2">核心概念:</h3>
         <ul className="list-disc list-inside text-gray-700 mb-4 space-y-2">
           <li>
-            <strong>时间账户：</strong> 每个任务、项目、甚至您每天的“未分配时间”都可以视为一个独立的账户。
+            <strong>时间账户：</strong> 每个任务、项目、甚至您每天的"未分配时间"都可以视为一个独立的账户。
           </li>
           <li>
             <strong>借方与贷方：</strong>
-            当你开始一个任务时，时间会从一个账户（如“未分配时间”）
+            当你开始一个任务时，时间会从一个账户（如"未分配时间"）
             <span className="font-bold text-red-600">贷出</span> (减少)，同时被
             <span className="font-bold text-green-600">借入</span>
             到您正在进行的任务账户 (增加)。
           </li>
           <li>
-            <strong>时间“结转”：</strong>
-            当您完成一个任务或阶段性工作后，您可以将任务账户中花费的时间“结转”到“产出账户”或另一个相关项目账户。例如，您在“学习会计”上花费的时间，最终会“结转”到“项目产出 - 会计原型”账户中，代表您的投入已转化为实际成果。
+            <strong>时间"结转"：</strong>
+            当您完成一个任务或阶段性工作后，您可以将任务账户中花费的时间"结转"到"产出账户"或另一个相关项目账户。例如，您在"学习会计"上花费的时间，最终会"结转"到"项目产出 - 会计原型"账户中，代表您的投入已转化为实际成果。
           </li>
           <li>
-            **平衡：** 永远保持总借方时间等于总贷方时间，确保您的时间流向清晰可追溯。
+            <strong>平衡：</strong>
+            永远保持总借方时间等于总贷方时间，确保您的时间流向清晰可追溯。
           </li>
         </ul>
         <p className="text-gray-700 mb-6 leading-relaxed">
-          通过这种方式，您可以清晰地追踪时间投入，评估产出效率，并在每个“会计周期”结束后进行分析和调整。
+          通过这种方式，您可以清晰地追踪时间投入，评估产出效率，并在每个"会计周期"结束后进行分析和调整。
         </p>
         <button
           onClick={onClose}
@@ -964,6 +1293,94 @@ const OnboardingModal: FC<OnboardingModalProps> = ({ onClose }) => {
   );
 };
 
+// 计时日志界面
+interface TimeLogViewProps {
+  timeLogs: TimeLog[];
+  todos: Todo[];
+  formatTime: (seconds: number) => string;
+  clearTimeLogs: () => void;
+}
+
+const TimeLogView: FC<TimeLogViewProps> = ({ timeLogs, todos, formatTime, clearTimeLogs }) => {
+  // Helper to get display name for accounts
+  const getAccountDisplayName = (accountId: string | undefined): string => {
+    if (!accountId) {
+      return "未知账户";
+    }
+    if (accountId.startsWith('Todo-')) {
+      return todos.find(t => t.id === accountId)?.text || accountId;
+    }
+    return accountId;
+  };
+
+  // 新增：专门用于格式化结转时间量的函数
+  const formatTransferAmount = (seconds: number): string => {
+    if (seconds < 60) return `${seconds}秒`;
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = seconds % 60;
+    let result = '';
+    if (hrs > 0) result += `${hrs}小时 `;
+    if (mins > 0) result += `${mins}分钟 `;
+    if (secs > 0) result += `${secs}秒`;
+    return result.trim();
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto bg-white rounded-lg shadow-md p-6">
+      <div className="flex justify-between items-center mb-6">
+        <h2 className="text-3xl font-bold text-indigo-700">
+          计时与结转日志
+        </h2>
+        {timeLogs.length > 0 && (
+          <button
+            onClick={clearTimeLogs}
+            className="px-4 py-2 bg-red-500 text-white font-semibold rounded-lg shadow-md hover:bg-red-600 transition duration-300 ease-in-out text-sm"
+          >
+            清除全部日志
+          </button>
+        )}
+      </div>
+      {timeLogs.length === 0 ? (
+        <p className="text-center text-gray-500">暂无日志记录。</p>
+      ) : (
+        <ul className="space-y-4 max-h-[400px] overflow-y-auto pr-2">
+          {[...timeLogs].sort((a, b) => b.timestamp - a.timestamp).map((log) => (
+            <li
+              key={log.id}
+              className={`p-4 rounded-lg shadow-sm
+                ${log.type === 'timer' ? 'bg-blue-50 border border-blue-200' : 'bg-purple-50 border border-purple-200'}
+              `}
+            >
+              <p className="text-xs text-gray-500 mb-1">
+                {new Date(log.timestamp).toLocaleString()}
+              </p>
+              {log.type === 'timer' ? (
+                <div>
+                  <p className="text-lg font-semibold text-gray-800">
+                    <span className="text-blue-700">[计时]</span> {log.taskText || log.taskId}
+                  </p>
+                  <p className="text-sm text-gray-600 mt-1">
+                    总计: {formatTime((log.endTime! - log.startTime!) / 1000)}
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <p className="text-lg font-semibold text-gray-800">
+                    <span className="text-purple-700">[结转]</span> 将 <span className="font-bold">{formatTransferAmount(log.transferAmount || 0)}</span> 从
+                    <span className="font-bold"> {getAccountDisplayName(log.fromAccount)}</span> 结转到
+                    <span className="font-bold"> {getAccountDisplayName(log.toAccount)}</span>
+                  </p>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+};
+
 // 移除了 InjectStyles 组件和 CDN script 标签，因为 CSS 将通过本地构建加载。
 
 // 渲染主应用
@@ -975,4 +1392,3 @@ export default function Main() {
     <App />
   );
 }
-
