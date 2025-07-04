@@ -1,34 +1,33 @@
 import React, { useState, useEffect, useRef, createContext, useContext, FC, useMemo } from 'react';
 
-// 定义时间账户的类型
+// =====================================
+// 类型与接口定义 (Type & Interface Definitions)
+// =====================================
 interface TimeAccounts {
   [key: string]: number;
 }
 
-// 定义待办任务的类型
 interface Todo {
   id: string;
   text: string;
+  isCompleted: boolean;
 }
 
-// 定义计时日志的类型
-// 定义计时日志的类型
 interface TimeLog {
-     id: string;
-     type: 'timer' | 'transfer'; // 新增：日志类型，区分计时和结转
-     timestamp: number; // 新增：记录操作发生的时间
-     // 计时日志特有字段
-     taskId?: string;
-     taskText?: string;
-     startTime?: number;
-     endTime?: number;
-     // 结转日志特有字段
-     fromAccount?: string;
-     toAccount?: string;
-     transferAmount?: number; // 结转的时间量（秒）
-  }
+  id: string;
+  type: 'timer' | 'transfer';
+  timestamp: number;
+  // Timer-specific
+  taskId?: string;
+  taskText?: string;
+  startTime?: number;
+  endTime?: number;
+  // Transfer-specific
+  fromAccount?: string;
+  toAccount?: string;
+  transferAmount?: number;
+}
 
-// 定义上下文的类型
 interface TimeAccountsContextType {
   timeAccounts: TimeAccounts;
   setTimeAccounts: React.Dispatch<React.SetStateAction<TimeAccounts>>;
@@ -37,31 +36,37 @@ interface TimeAccountsContextType {
   addMonumentAccount: (name: string) => boolean;
 }
 
-// 创建一个上下文来管理时间账户数据
 const TimeAccountsContext = createContext<TimeAccountsContextType | null>(null);
 
-// 主要的应用组件
+// =====================================
+// 初始数据 (Initial Data)
+// =====================================
+const initialTodosData: Todo[] = [
+  { id: 'initial-todo-1', text: '完成会计原理学习', isCompleted: false },
+  { id: 'initial-todo-2', text: '开发复式记账法原型', isCompleted: false },
+  { id: 'initial-todo-3', text: '查阅 React 文档', isCompleted: false },
+];
+
+// =====================================
+// 主应用组件 (App Component)
+// =====================================
 const App: FC = () => {
   // 定义时间账户的状态
-  // "未分配时间"和"休息时间"现在是累积性的，记录时间投入到这些类别的总量。
   const [timeAccounts, setTimeAccounts] = useState<TimeAccounts>({
-    '未分配时间 (Unallocated)': 0, // 初始为0，因为它会直接累加未指定待办的时间
-    '休息时间 (Rest Time)': 0,     // 初始为0，它会直接累加休息时间
-    '学习会计 (Learn Accounting)': 0,
-    '编写代码 (Coding Project)': 0,
-    '阅读文档 (Reading Docs)': 0,
-    '无效消耗 (Wasted Time)': 0,   // 时间损耗账户
-    '默认损失 (Default Loss)': 0, // 新增：因中断而产生的默认损失时间
-    // 初始纪念碑子科目 (用户可自定义添加)
+    '未分配时间 (Unallocated)': 0,
+    '休息时间 (Rest Time)': 0,
+    '无效消耗 (Wasted Time)': 0,
+    '默认损失 (Default Loss)': 0,
     '纪念碑 - 核心原型完成 (Core Proto Done)': 0,
+    // 从待办数据动态生成初始账户
+    ...initialTodosData.reduce((acc, todo) => {
+      acc[todo.id] = 0;
+      return acc;
+    }, {} as TimeAccounts),
   });
 
-  // 待办任务列表，用于计时
-  const [todos, setTodos] = useState<Todo[]>([
-    { id: '学习会计 (Learn Accounting)', text: '完成会计原理学习' },
-    { id: '编写代码 (Coding Project)', text: '开发复式记账法原型' },
-    { id: '阅读文档 (Reading Docs)', text: '查阅 React 文档' },
-  ]);
+  // 待办任务列表，使用新的稳定初始数据
+  const [todos, setTodos] = useState<Todo[]>(initialTodosData);
   const [timeLogs, setTimeLogs] = useState<TimeLog[]>([]); // 新增：计时日志状态
   const [isLoading, setIsLoading] = useState(true); // 新增：加载状态，防止初始状态覆盖本地存储
 
@@ -218,9 +223,9 @@ const App: FC = () => {
             }
             
             // 阶段切换后，当前计时器完成其使命，可以被清除
-            if (timerRef.current) {
-              clearInterval(timerRef.current);
-            }
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
             return 0;
           }
           return prevTime - 1;
@@ -352,9 +357,21 @@ const App: FC = () => {
 
   // 添加待办任务
   const addTodo = (text: string) => {
-    const newId = `Todo-${Date.now()}`; // 为待办任务生成唯一ID
-    setTodos([...todos, { id: newId, text }]);
-    setTimeAccounts((prevAccounts) => ({ ...prevAccounts, [newId]: 0 })); // 为新待办添加账户，初始时间为0
+    const newId = `Todo-${Date.now()}`;
+    setTodos(prevTodos => [...prevTodos, { id: newId, text, isCompleted: false }]);
+    setTimeAccounts(prevAccounts => ({ ...prevAccounts, [newId]: 0 }));
+  };
+
+  const completeTodo = (todoId: string) => {
+    setTodos(prevTodos =>
+      prevTodos.map(todo =>
+        todo.id === todoId ? { ...todo, isCompleted: true } : todo
+      )
+    );
+    // 如果完成的是当前计时任务，则停止计时
+    if (activeTaskId === todoId) {
+        handleStopPomodoro();
+    }
   };
 
   // 删除待办任务
@@ -458,6 +475,133 @@ const App: FC = () => {
     }
   };
 
+  // 新增：重命名待办事项的函数
+  const renameTodo = (todoId: string, newText: string) => {
+    setTodos(prevTodos =>
+      prevTodos.map(todo =>
+        todo.id === todoId ? { ...todo, text: newText.trim() } : todo
+      )
+    );
+  };
+
+  const [completedMonuments, setCompletedMonuments] = useState<string[]>([]);
+
+  useEffect(() => {
+    // In the main data loading useEffect
+    const savedCompletedMonuments = localStorage.getItem('completedMonuments');
+    if (savedCompletedMonuments) {
+      setCompletedMonuments(JSON.parse(savedCompletedMonuments));
+    }
+  }, []);
+
+  useEffect(() => {
+    // In the main data saving useEffect
+    if (!isLoading) {
+      localStorage.setItem('completedMonuments', JSON.stringify(completedMonuments));
+    }
+  }, [completedMonuments, isLoading]);
+
+  const archiveMonument = (monumentId: string) => {
+    setCompletedMonuments(prev => [...prev, monumentId]);
+  };
+  
+  const renameAccount = (oldName: string, newName: string) => {
+    const trimmedNewName = newName.trim();
+    if (!trimmedNewName) {
+      alert("账户名称不能为空。");
+      return;
+    }
+
+    const accountType = getAccountType(oldName);
+
+    // 如果是待办事项，我们只修改它的显示文本
+    if (accountType === 'todo') {
+      renameTodo(oldName, trimmedNewName);
+      return;
+    }
+
+    // 对于通用账户或纪念碑，我们要重命名账户键
+    // 首先检查新名称是否已存在
+    if (timeAccounts[trimmedNewName] !== undefined && oldName !== trimmedNewName) {
+      alert(`账户 "${trimmedNewName}" 已存在。`);
+      return;
+    }
+
+    // 更新 timeAccounts 状态
+    setTimeAccounts(prevAccounts => {
+      const newAccounts = { ...prevAccounts };
+      const accountValue = newAccounts[oldName];
+      delete newAccounts[oldName];
+      newAccounts[trimmedNewName] = accountValue;
+      return newAccounts;
+    });
+
+    // 如果被重命名的账户是当前活动任务，则更新活动任务ID
+    if (activeTaskId === oldName) {
+      setActiveTaskId(trimmedNewName);
+    }
+    if (activeTaskAtPhaseStartRef.current === oldName) {
+      activeTaskAtPhaseStartRef.current = trimmedNewName;
+    }
+
+    // 当重命名纪念碑时，如果它在已归档列表中，也需要更新
+    if (accountType === 'monument' && completedMonuments.includes(oldName)) {
+      setCompletedMonuments(prev => prev.map(m => m === oldName ? trimmedNewName : m));
+    }
+  };
+
+  const deleteAccount = (accountName: string) => {
+    // 使用显示名称进行确认，更友好
+    const displayName = getAccountDisplayName(accountName);
+    if (window.confirm(`您确定要删除账户 "${displayName}" 吗？\n此操作将移除其所有累计时间，且无法撤销。`)) {
+      
+      const accountType = getAccountType(accountName);
+
+      // 如果是待办事项，也需要从todos列表中删除
+      if (accountType === 'todo') {
+        setTodos(prev => prev.filter(t => t.id !== accountName));
+      }
+
+      // 从时间账户中删除
+      setTimeAccounts(prev => {
+        const newAccounts = { ...prev };
+        delete newAccounts[accountName];
+        return newAccounts;
+      });
+      
+      // 如果删除的是当前活动任务，则停止计时
+      if (activeTaskId === accountName) {
+        handleStopPomodoro();
+      }
+
+      // 如果删除的是已归档的纪念碑，也从归档列表中移除
+      if (accountType === 'monument' && completedMonuments.includes(accountName)) {
+          setCompletedMonuments(prev => prev.filter(m => m !== accountName));
+      }
+    }
+  };
+
+  const isManageable = (accountName: string): boolean => {
+    const type = getAccountType(accountName);
+    return type === 'todo' || type === 'general';
+  };
+
+  const getAccountDisplayName = (accountName: string): string => {
+    if (getAccountType(accountName) === 'todo') {
+        return todos.find(t => t.id === accountName)?.text || accountName;
+    }
+    return accountName;
+  };
+
+  // Helper functions that need access to App's state (todos)
+  const getAccountType = (accountName: string): string => {
+    if (accountName.startsWith('Todo-')) return 'todo';
+    if (accountName.startsWith('纪念碑 -')) return 'monument';
+    if (['未分配时间 (Unallocated)', '休息时间 (Rest Time)', '无效消耗 (Wasted Time)', '默认损失 (Default Loss)'].includes(accountName)) return 'system';
+    return 'general';
+  };
+
+
   return (
     // 使用Context Provider包裹整个应用，以便子组件访问时间账户数据
     <TimeAccountsContext.Provider value={contextValue}>
@@ -480,7 +624,7 @@ const App: FC = () => {
                 className={`py-2 px-4 rounded-full transition duration-300 ease-in-out
                   ${currentView === 'accountTransfer' ? 'bg-indigo-500' : 'hover:bg-indigo-600'}`}
               >
-                科目结转
+                账户管理
               </button>
             </li>
             <li>
@@ -524,9 +668,11 @@ const App: FC = () => {
               onStopPomodoro={handleStopPomodoro}
               handleFastForward={handleFastForward} // 传递快进按钮的handler
               handleRestartPomodoro={handleRestartPomodoro} // 传递重新开始按钮的handler
-              todos={todos}
+              todos={todos.filter(todo => !todo.isCompleted)} // 只传递未完成的待办
               addTodo={addTodo}
               deleteTodo={deleteTodo}
+              completeTodo={completeTodo} // 传递新函数
+              renameTodo={renameTodo}
               onboarding={() => setShowOnboarding(true)}
             />
           )}
@@ -535,7 +681,14 @@ const App: FC = () => {
             <AccountTransferView
               allAccountNames={Object.keys(timeAccounts)}
               todos={todos}
-              addTimeLogEntry={addTimeLogEntry} // 新增：传递 addTimeLogEntry 函数
+              renameAccount={renameAccount}
+              deleteAccount={deleteAccount}
+              addTimeLogEntry={addTimeLogEntry}
+              completedMonuments={completedMonuments}
+              archiveMonument={archiveMonument}
+              getAccountType={getAccountType}
+              getAccountDisplayName={getAccountDisplayName}
+              isManageable={isManageable}
             />
           )}
 
@@ -582,6 +735,8 @@ interface TimerTodoViewProps {
   todos: Todo[];
   addTodo: (text: string) => void;
   deleteTodo: (id: string) => void;
+  completeTodo: (id: string) => void;
+  renameTodo: (id: string, newText: string) => void;
   onboarding: () => void;
 }
 
@@ -596,6 +751,8 @@ const TimerTodoView: FC<TimerTodoViewProps> = ({
   todos,
   addTodo,
   deleteTodo,
+  completeTodo,
+  renameTodo,
   onboarding
 }) => {
   const context = useContext(TimeAccountsContext);
@@ -706,48 +863,43 @@ const TimerTodoView: FC<TimerTodoViewProps> = ({
         </div>
 
         <ul className="space-y-3 overflow-y-auto max-h-96 flex-grow">
-          {todos.length === 0 ? (
-            <p className="text-center text-gray-500">暂无待办任务。快添加一个吧！</p>
-          ) : (
-            todos.map((todo) => (
-              <li
-                key={todo.id}
-                className={`flex items-center justify-between p-3 rounded-lg border
-                  ${activeTaskId === todo.id ? 'bg-indigo-50 border-indigo-300 shadow-sm' : 'bg-gray-50 border-gray-200'}
-                `}
-              >
+          {todos.map((todo) => (
+            <li
+              key={todo.id}
+              className={`p-3 rounded-lg border transition-all duration-300
+                ${activeTaskId === todo.id ? 'bg-indigo-50 border-indigo-300 shadow-sm' : 'bg-gray-50 border-gray-200'}
+              `}
+            >
+              <div className="flex items-center justify-between">
                 <div className="flex-grow mr-4">
                   <span className="text-lg text-gray-800 font-medium">{todo.text}</span>
                   <p className="text-sm text-gray-500">
                     已投入: {formatTime(timeAccounts[todo.id] || 0)}
                   </p>
                 </div>
-                <div className="flex space-x-2">
+                <div className="flex items-center space-x-1">
                   <button
                     onClick={() => onStartPomodoro(todo.id)}
                     disabled={pomodoroState !== 'idle' && activeTaskId !== todo.id}
-                    className={`px-4 py-2 rounded-full text-sm font-semibold transition duration-300 ease-in-out
+                    className={`px-4 py-2 rounded-full text-sm font-semibold transition-all duration-200
                       ${activeTaskId === todo.id
-                        ? 'bg-orange-500 text-white hover:bg-orange-600'
+                        ? 'bg-orange-500 text-white'
                         : 'bg-green-500 text-white hover:bg-green-600'}
                       ${(pomodoroState !== 'idle' && activeTaskId !== todo.id) ? 'opacity-50 cursor-not-allowed' : ''}
                     `}
                   >
-                    {activeTaskId === todo.id ? '正在计时' : '开始计时'}
+                    {activeTaskId === todo.id ? '计时中' : '开始'}
                   </button>
-                  <button
-                    onClick={() => deleteTodo(todo.id)}
-                    className="p-2 text-red-500 hover:text-red-700 transition duration-300 ease-in-out"
-                    title="删除任务"
-                  >
-                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm6 0a1 1 0 11-2 0v6a1 1 0 112 0V8z" clipRule="evenodd" />
-                    </svg>
+                  <button onClick={() => deleteTodo(todo.id)} title="删除" className="p-2 text-gray-500 hover:text-red-600 rounded-full transition-colors">
+                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm6 0a1 1 0 11-2 0v6a1 1 0 112 0V8z" clipRule="evenodd"></path></svg>
+                  </button>
+                  <button onClick={() => completeTodo(todo.id)} title="完成" className="p-2 text-gray-500 hover:text-green-600 rounded-full transition-colors">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
                   </button>
                 </div>
-              </li>
-            ))
-          )}
+              </div>
+            </li>
+          ))}
         </ul>
       </div>
     </div>
@@ -755,24 +907,26 @@ const TimerTodoView: FC<TimerTodoViewProps> = ({
 };
 
 
-// 2. 科目结转界面
+// 2. 账户管理与结转界面
 interface AccountTransferViewProps {
   allAccountNames: string[];
   todos: Todo[];
-  addTimeLogEntry: (logDetails: {
-    type: 'timer';
-    taskId: string;
-    startTime: number;
-    endTime: number;
-  } | {
+  renameAccount: (oldName: string, newName: string) => void;
+  deleteAccount: (accountName: string) => void;
+  addTimeLogEntry: (details: {
     type: 'transfer';
     fromAccount: string;
     toAccount: string;
     transferAmount: number;
-  }) => void; // 新增：结转日志记录函数
+  }) => void;
+  completedMonuments: string[];
+  archiveMonument: (monumentId: string) => void;
+  getAccountType: (accountName: string) => string;
+  getAccountDisplayName: (accountName: string) => string;
+  isManageable: (accountName: string) => boolean;
 }
 
-const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames, todos, addTimeLogEntry }) => {
+const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames, todos, renameAccount, deleteAccount, addTimeLogEntry, completedMonuments, archiveMonument, getAccountType, getAccountDisplayName, isManageable }) => {
   const context = useContext(TimeAccountsContext);
   if (!context) {
     throw new Error('AccountTransferView must be used within a TimeAccountsContext.Provider');
@@ -780,8 +934,26 @@ const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames, to
   const { timeAccounts, setTimeAccounts, formatTime } = context;
   const [fromAccount, setFromAccount] = useState<string>('');
   const [toAccount, setToAccount] = useState<string>('');
-  const [amount, setAmount] = useState<string>(''); // 以秒为单位
+  const [amount, setAmount] = useState<string>('');
   const [message, setMessage] = useState<string>('');
+  const [editingAccountName, setEditingAccountName] = useState<string | null>(null);
+  const [newAccountName, setNewAccountName] = useState<string>('');
+  const [filter, setFilter] = useState('all');
+  const [showCompleted, setShowCompleted] = useState(false);
+
+  const filteredAccounts = Object.keys(timeAccounts)
+    .filter(name => {
+      const isMonument = name.startsWith('纪念碑 -');
+      const isCompleted = completedMonuments.includes(name);
+      
+      if(isMonument && isCompleted && !showCompleted) {
+          return false;
+      }
+      
+      if (filter === 'all') return true;
+      return getAccountType(name) === filter;
+    })
+    .sort();
 
   // 模拟 T 字表数据，显示最近一次结转
   const [tAccountDebit, setTAccountDebit] = useState<{ account: string; amount: number }[]>([]);
@@ -813,16 +985,18 @@ const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames, to
       newAccounts[toAccount] = (newAccounts[toAccount] || 0) + transferAmount;   // 借入 (增加)
       return newAccounts;
     });
+    
+    // 记录结转日志
+    addTimeLogEntry({
+      type: 'transfer',
+      fromAccount,
+      toAccount,
+      transferAmount
+    });
 
     // 更新 T 字表模拟数据
     setTAccountDebit([{ account: toAccount, amount: transferAmount }]);
     setTAccountCredit([{ account: fromAccount, amount: transferAmount }]);
-    addTimeLogEntry({
-            type: 'transfer',
-            fromAccount,
-            toAccount,
-            transferAmount,
-        });
 
     setMessage(`成功将 ${formatTime(transferAmount)} 从 ${fromAccount} 结转到 ${toAccount}。`);
     // 清空表单
@@ -832,78 +1006,121 @@ const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames, to
     setTimeout(() => setMessage(''), 3000); // 3秒后清除消息
   };
 
+  const handleStartEditing = (accountName: string) => {
+    setEditingAccountName(accountName);
+    setNewAccountName(getAccountDisplayName(accountName));
+  };
+
+  const handleCancelEditing = () => {
+    setEditingAccountName(null);
+    setNewAccountName('');
+  };
+
+  const handleSaveEditing = (oldName: string) => {
+    renameAccount(oldName, newAccountName);
+    handleCancelEditing();
+  };
+
+  const getAccountBgColor = (accountName: string): string => {
+    switch (getAccountType(accountName)) {
+      case 'todo': return 'bg-blue-50 hover:bg-blue-100';
+      case 'monument': return 'bg-emerald-50 hover:bg-emerald-100';
+      case 'system': return 'bg-purple-50 hover:bg-purple-100';
+      default: return 'bg-gray-50 hover:bg-gray-100';
+    }
+  };
+
   return (
     <div className="flex flex-col lg:flex-row gap-6 max-w-6xl mx-auto">
-      {/* 左侧：T 字表模拟 */}
+      {/* 左侧：账户列表与管理 */}
       <div className="w-full lg:w-1/2 bg-white rounded-lg shadow-md p-6">
-        <h2 className="text-3xl font-bold text-indigo-700 mb-6 text-center">
-          科目结转 (T 字表模拟)
-        </h2>
-        <p className="text-sm text-gray-600 mb-4 text-center">
-          每次结转操作会在此处显示借方和贷方对应关系。
-        </p>
-        <div className="flex border border-gray-300 rounded-lg overflow-hidden mb-6">
-          <div className="w-1/2 p-4 border-r border-gray-300">
-            <h3 className="text-lg font-bold text-green-700 mb-2">借方 (Debit)</h3>
-            <ul className="space-y-1">
-              {tAccountDebit.length === 0 ? (
-                <li className="text-gray-500">无记录</li>
-              ) : (
-                tAccountDebit.map((entry, index) => (
-                  <li key={index} className="text-gray-800">
-                    {entry.account}: {formatTime(entry.amount)}
-                  </li>
-                ))
-              )}
-            </ul>
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-3xl font-bold text-indigo-700">账户列表</h2>
+          <div className="relative">
+            <select
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              className="appearance-none bg-gray-100 border border-gray-300 rounded-md py-2 pl-3 pr-8 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="all">所有账户</option>
+              <option value="todo">待办账户</option>
+              <option value="monument">纪念碑</option>
+              <option value="system">系统账户</option>
+              <option value="general">通用账户</option>
+            </select>
+            <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-700">
+              <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
+            </div>
           </div>
-          <div className="w-1/2 p-4">
-            <h3 className="text-lg font-bold text-red-700 mb-2">贷方 (Credit)</h3>
-            <ul className="space-y-1">
-              {tAccountCredit.length === 0 ? (
-                <li className="text-gray-500">无记录</li>
-              ) : (
-                tAccountCredit.map((entry, index) => (
-                  <li key={index} className="text-gray-800">
-                    {entry.account}: {formatTime(entry.amount)}
-                  </li>
-                ))
-              )}
-            </ul>
-          </div>
+          <label className="flex items-center text-sm text-gray-600">
+            <input
+              type="checkbox"
+              checked={showCompleted}
+              onChange={(e) => setShowCompleted(e.target.checked)}
+              className="mr-2 h-4 w-4 rounded text-indigo-600 focus:ring-indigo-500"
+            />
+            显示已归档纪念碑
+          </label>
         </div>
+        <div className="space-y-3 overflow-y-auto max-h-[calc(100vh-22rem)] pr-2">
+          {filteredAccounts.map((accountName) => {
+            const isCompleted = completedMonuments.includes(accountName);
 
-        <h3 className="text-xl font-bold text-indigo-700 mb-4 text-center">
-          当前账户余额
-        </h3>
-        <div className="space-y-3 overflow-y-auto max-h-64">
-        {Object.entries(timeAccounts).map(([accountName, time]) => {
-               const displayedName = accountName.startsWith('Todo-')
-                  ? todos.find(t => t.id === accountName)?.text || accountName
-                  : accountName;
-               return (
-                  <div
-                    key={accountName}
-                    className={`flex justify-between items-center p-2 rounded-lg
-                       ${accountName.includes('未分配') ? 'bg-blue-50' : ''}
-                       ${accountName.startsWith('纪念碑 -') ? 'bg-emerald-50' : ''}
-                       ${accountName.includes('无效') ? 'bg-red-50' : ''}
-                       ${accountName.includes('休息') ? 'bg-purple-50' : ''}
-                       ${accountName.includes('默认损失') ? 'bg-red-100' : ''}
-                       ${!accountName.includes('未分配') && !accountName.startsWith('纪念碑 -') && !accountName.includes('无效') && !accountName.includes('休息') && !accountName.includes('默认损失') && !accountName.startsWith('Todo-') ? 'bg-gray-50' : ''}
-                    `}
-                  >
-                    <span className="font-medium text-gray-700">{displayedName}:</span>
-                    <span className="font-bold text-indigo-600">
-                       {formatTime(time)}
-                    </span>
+            return (
+              <div key={accountName} className={`flex justify-between items-center p-3 rounded-lg ${getAccountBgColor(accountName)}`}>
+                {editingAccountName === accountName ? (
+                  <div className="flex-grow flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={newAccountName}
+                      onChange={(e) => setNewAccountName(e.target.value)}
+                      className="flex-grow px-2 py-1 border border-indigo-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      autoFocus
+                      onKeyPress={(e) => { if (e.key === 'Enter') handleSaveEditing(accountName); }}
+                    />
+                    <button onClick={() => handleSaveEditing(accountName)} className="p-1 text-green-600 hover:text-green-800" title="保存">
+                      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                    </button>
+                    <button onClick={handleCancelEditing} className="p-1 text-gray-500 hover:text-gray-700" title="取消">
+                      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
                   </div>
-               );
-             })}
+                ) : (
+                  <>
+                    <span className="font-medium text-gray-700 flex-grow">
+                      {isCompleted && <span className="text-gray-400">[已归档] </span>}
+                      {getAccountDisplayName(accountName)}
+                    </span>
+                    <span className="font-bold text-indigo-600 mr-4">
+                      {formatTime(timeAccounts[accountName])}
+                    </span>
+                    
+                    <div className="flex items-center space-x-1">
+                      {isManageable(accountName) && (
+                        <>
+                          <button onClick={() => handleStartEditing(accountName)} title="重命名" className="p-2 text-gray-500 hover:text-blue-600 rounded-full transition-colors">
+                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L15.232 5.232z"></path></svg>
+                          </button>
+                          <button onClick={() => deleteAccount(accountName)} title="删除" className="p-2 text-gray-500 hover:text-red-600 rounded-full transition-colors">
+                            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm6 0a1 1 0 11-2 0v6a1 1 0 112 0V8z" clipRule="evenodd"></path></svg>
+                          </button>
+                        </>
+                      )}
+                      {getAccountType(accountName) === 'monument' && !isCompleted && (
+                        <button onClick={() => archiveMonument(accountName)} title="归档纪念碑" className="p-2 text-gray-500 hover:text-blue-600 rounded-full transition-colors">
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"></path></svg>
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
 
-      {/* 右侧：结转操作表单 */}
+      {/* 右侧：结转操作 */}
       <div className="w-full lg:w-1/2 bg-white rounded-lg shadow-md p-6 flex flex-col">
         <h2 className="text-3xl font-bold text-indigo-700 mb-6 text-center">
           执行时间结转
@@ -923,22 +1140,20 @@ const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames, to
               className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
             >
               <option value="">选择账户</option>
-              {allAccountNames
-                    .filter(name =>
-                       !name.startsWith('纪念碑 -') &&
-                       !name.includes('休息时间') &&
-                       !name.includes('默认损失')
-                    )
-                    .map((name) => {
-                       const displayedName = name.startsWith('Todo-')
-                         ? todos.find(t => t.id === name)?.text || name
-                         : name;
-                       return (
-                         <option key={name} value={name}>
-                            {displayedName} (当前: {formatTime(timeAccounts[name])})
-                         </option>
-                       );
-                    })}
+              {allAccountNames.filter(name =>
+                !name.startsWith('纪念碑 -') &&
+                !name.includes('休息时间') &&
+                !name.includes('默认损失')
+              ).map((name) => {
+                const displayedName = name.startsWith('Todo-')
+                  ? todos.find(t => t.id === name)?.text || name
+                  : name;
+                return (
+                  <option key={name} value={name}>
+                    {displayedName} (当前: {formatTime(timeAccounts[name])})
+                  </option>
+                );
+              })}
             </select>
           </div>
           <div>
@@ -952,23 +1167,21 @@ const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames, to
               className="w-full px-3 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
             >
               <option value="">选择账户</option>
-              {allAccountNames
-                    .filter(name =>
-                       !name.includes('未分配') &&
-                       !name.includes('休息时间') &&
-                       !name.includes('无效消耗') &&
-                       !name.includes('默认损失')
-                    )
-                    .map((name) => {
-                       const displayedName = name.startsWith('Todo-')
-                         ? todos.find(t => t.id === name)?.text || name
-                         : name;
-                       return (
-                         <option key={name} value={name}>
-                            {displayedName}
-                         </option>
-                       );
-                    })}
+              {allAccountNames.filter(name =>
+                !name.includes('未分配') &&
+                !name.includes('休息时间') &&
+                !name.includes('无效消耗') &&
+                !name.includes('默认损失')
+              ).map((name) => {
+                const displayedName = name.startsWith('Todo-')
+                  ? todos.find(t => t.id === name)?.text || name
+                  : name;
+                return (
+                  <option key={name} value={name}>
+                    {displayedName}
+                  </option>
+                );
+              })}
             </select>
           </div>
           <div>
@@ -985,13 +1198,13 @@ const AccountTransferView: FC<AccountTransferViewProps> = ({ allAccountNames, to
               min="1"
             />
           </div>
-          <button
-            onClick={handleTransfer}
-            className="w-full py-3 px-4 bg-purple-600 text-white font-semibold rounded-lg shadow-md hover:bg-purple-700 transition duration-300 ease-in-out"
-          >
-            执行结转
-          </button>
         </div>
+        <button
+          onClick={handleTransfer}
+          className="w-full py-3 px-4 bg-purple-600 text-white font-semibold rounded-lg shadow-md hover:bg-purple-700 transition duration-300 ease-in-out mt-4"
+        >
+          执行结转
+        </button>
         {message && (
           <p className="mt-4 text-center text-sm font-medium text-gray-700 p-2 bg-gray-100 rounded-lg">
             {message}
