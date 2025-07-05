@@ -1,6 +1,6 @@
 {
   "name": "GenTanImaccount",
-  "version": "1.0.0",
+  "version": "1.0.2 beta",
   "type": "module",
   "private": true,
   "homepage": "./",
@@ -27,9 +27,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "electron-dev": "electron .",
-    "electron-packager-win": "npm run build && electron-packager . 时间复式记账法 --overwrite --asar=true --platform=win32 --arch=x64 --icon=assets/icon.ico --out=release --prune=true --ignore=node_modules/\\.pnpm --ignore=node_modules/\\.yarn --ignore=node_modules/\\.bin --ignore=node_modules/\\.cache --ignore=node_modules/\\.npm --ignore=node_modules/\\.git --ignore=release",
-    "electron-packager-mac": "npm run build && electron-packager . 时间复式记账法 --overwrite --asar=true --platform=darwin --arch=x64 --icon=assets/icon.icns --out=release --prune=true --ignore=node_modules/\\.pnpm --ignore=node_modules/\\.yarn --ignore=node_modules/\\.bin --ignore=node_modules/\\.cache --ignore=node_modules/\\.npm --ignore=node_modules/\\.git --ignore=release",
-    "electron-packager-linux": "npm run build && electron-packager . 时间复式记账法 --overwrite --asar=true --platform=linux --arch=x64 --icon=assets/icon.png --out=release --prune=true --ignore=node_modules/\\.pnpm --ignore=node_modules/\\.yarn --ignore=node_modules/\\.bin --ignore=node_modules/\\.cache --ignore=node_modules/\\.npm --ignore=node_modules/\\.git --ignore=release"
+    "electron-packager-win": "npm run build && electron-packager . GenTanImaccount --overwrite --asar=true --platform=win32 --arch=x64 --icon=assets/icon.ico --out=release --prune=true --ignore=node_modules/\\.pnpm --ignore=node_modules/\\.yarn --ignore=node_modules/\\.bin --ignore=node_modules/\\.cache --ignore=node_modules/\\.npm --ignore=node_modules/\\.git --ignore=release",
+    "electron-packager-mac": "npm run build && electron-packager . GenTanImaccount --overwrite --asar=true --platform=darwin --arch=x64 --icon=assets/icon.icns --out=release --prune=true --ignore=node_modules/\\.pnpm --ignore=node_modules/\\.yarn --ignore=node_modules/\\.bin --ignore=node_modules/\\.cache --ignore=node_modules/\\.npm --ignore=node_modules/\\.git --ignore=release",
+    "electron-packager-linux": "npm run build &2& electron-packager . GenTanImaccount --overwrite --asar=true --platform=linux --arch=x64 --icon=assets/icon.png --out=release --prune=true --ignore=node_modules/\\.pnpm --ignore=node_modules/\\.yarn --ignore=node_modules/\\.bin --ignore=node_modules/\\.cache --ignore=node_modules/\\.npm --ignore=node_modules/\\.git --ignore=release"
   },
   "devDependencies": {
     "@types/react": "^19.1.8",

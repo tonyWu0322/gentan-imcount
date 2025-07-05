@@ -35,7 +35,7 @@ export const MonumentsView: FC<MonumentsViewProps> = ({ showAlert }) => {
   return (
     <div className="flex flex-col items-center max-w-4xl mx-auto bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
       <h2 className="text-3xl font-bold text-indigo-700 dark:text-indigo-400 mb-8 text-center">
-        我的纪念碑
+        我的纪念碑 (功能待完善)
       </h2>
       <p className="text-lg text-gray-700 dark:text-gray-300 mb-6 text-center">
         "纪念碑"是您所有投入时间最终转化为的回报或成就的集合。您可以自定义不同的纪念碑来反映您的产出。

@@ -1,5 +1,5 @@
 // main.js
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const log = require('electron-log');
 
@@ -7,13 +7,15 @@ if (log.transports.file) {
   log.info(`Log file is at: ${log.transports.file.getFile().path}`);
 }
 
+let mainWindow;
+
 function createWindow() {
   // 创建浏览器窗口
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1200, // 窗口宽度
     height: 800, // 窗口高度
-    minWidth: 800, // 最小宽度
-    minHeight: 600, // 最小高度
+    minWidth: 600, // 最小宽度
+    minHeight: 400, // 最小高度
     webPreferences: {
       // 启用 Node.js 集成，允许在渲染进程中使用 Node.js API
       nodeIntegration: true,
@@ -56,6 +58,12 @@ function createWindow() {
 
 // 当 Electron 应用准备就绪时调用 createWindow
 app.whenReady().then(createWindow);
+
+ipcMain.on('toggle-always-on-top', (event, isAlwaysOnTop) => {
+  if (mainWindow) {
+    mainWindow.setAlwaysOnTop(isAlwaysOnTop);
+  }
+});
 
 // 当所有窗口都关闭时退出应用
 app.on('window-all-closed', () => {

@@ -9,6 +9,8 @@ import { SettingsView } from './components/SettingsView';
 import { TimeLogView } from './components/TimeLogView';
 import { OnboardingModal } from './components/OnboardingModal';
 
+const { ipcRenderer } = window.require ? window.require('electron') : { ipcRenderer: { on: () => {}, send: () => {} } };
+
 // =====================================
 // 初始数据 (Initial Data)
 // =====================================
@@ -40,6 +42,7 @@ const AppContent: React.FC = () => {
   // 待办任务列表，使用新的稳定初始数据
   const [todos, setTodos] = useState<Todo[]>(initialTodosData);
   const [timeLogs, setTimeLogs] = useState<TimeLog[]>([]); // 新增：计时日志状态
+  const [accountOrder, setAccountOrder] = useState<string[]>([]); // 新增：账户顺序
   const [isLoading, setIsLoading] = useState(true); // 新增：加载状态，防止初始状态覆盖本地存储
   
   // 番茄钟设置
@@ -86,6 +89,29 @@ const AppContent: React.FC = () => {
     }
   }, []); // 空依赖数组，只在组件挂载时运行一次
 
+  // Effect to synchronize accountOrder with timeAccounts after loading or changes
+  useEffect(() => {
+    // Don't run this logic until the initial load is complete
+    if (isLoading) {
+      return;
+    }
+
+    const savedOrder = JSON.parse(localStorage.getItem('accountOrder') || '[]');
+    const accountKeys = Object.keys(timeAccounts);
+
+    // Reconcile the order: keep existing ordered keys, and add new keys to the end.
+    const reconciledOrder = [
+      ...savedOrder.filter((key: string) => accountKeys.includes(key)),
+      ...accountKeys.filter((key: string) => !savedOrder.includes(key))
+    ];
+    
+    // Only update if they are actually different to avoid render loops.
+    if (JSON.stringify(reconciledOrder) !== JSON.stringify(accountOrder)) {
+       setAccountOrder(reconciledOrder);
+    }
+  // This effect should run whenever the source of truth for accounts changes.
+  }, [timeAccounts, isLoading]);
+
   // **保存数据**
   useEffect(() => {
     // 只有在加载完成后才开始保存，防止初始状态覆盖
@@ -93,6 +119,7 @@ const AppContent: React.FC = () => {
       try {
         localStorage.setItem('todos', JSON.stringify(todos));
         localStorage.setItem('timeAccounts', JSON.stringify(timeAccounts));
+        localStorage.setItem('accountOrder', JSON.stringify(accountOrder)); // 保存账户顺序
         localStorage.setItem('pomodoroSettings', JSON.stringify(pomodoroSettings)); // 保存设置
         if (timeLogs.length > 0) {
             localStorage.setItem('timeLogs', JSON.stringify(timeLogs));
@@ -101,7 +128,7 @@ const AppContent: React.FC = () => {
         console.error("Failed to save data to local storage", error);
       }
     }
-  }, [todos, timeAccounts, timeLogs, isLoading, pomodoroSettings]); // 当任何数据改变且加载完成后触发
+  }, [todos, timeAccounts, timeLogs, isLoading, pomodoroSettings, accountOrder]); // 当任何数据改变且加载完成后触发
 
   // 当前激活的任务ID (用于番茄钟将时间归类)
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -118,11 +145,12 @@ const AppContent: React.FC = () => {
   const phaseStartTimeRef = useRef<number | null>(null); // 新增：记录当前阶段开始时间
 
   // 计时器ID
-  const timerRef = useRef<NodeJS.Timeout | null>(null); // 明确计时器类型
+  const timerWorkerRef = useRef<Worker | null>(null);
   
   // 使用 ref 存储当前状态，确保计时器总是使用最新值
   const currentPomodoroStateRef = useRef<'idle' | 'focus' | 'break'>(pomodoroState);
   const currentActiveTaskIdRef = useRef<string | null>(activeTaskId);
+  const currentTodosRef = useRef<Todo[]>(todos); // New: Ref to store the latest todos
   
   // 更新 ref 值
   useEffect(() => {
@@ -133,6 +161,77 @@ const AppContent: React.FC = () => {
     currentActiveTaskIdRef.current = activeTaskId;
   }, [activeTaskId]);
 
+  useEffect(() => {
+    currentTodosRef.current = todos; // New: Update currentTodosRef whenever todos changes
+  }, [todos]);
+
+  // Web Worker for the timer
+  useEffect(() => {
+    // Vite specific syntax for loading a worker
+    timerWorkerRef.current = new Worker(new URL('/timer.worker.js', import.meta.url), { type: 'module' });
+
+    timerWorkerRef.current.onmessage = (e) => {
+      const { type, remainingTime } = e.data;
+
+      if (type === 'tick') {
+        setPomodoroRemainingTime(remainingTime);
+        
+        // Time accumulation logic, now driven by worker ticks
+        setTimeAccounts((prevAccounts) => {
+          const newAccounts = { ...prevAccounts };
+          if (currentPomodoroStateRef.current === 'focus') {
+            const activeTodo = currentTodosRef.current.find(t => t.id === currentActiveTaskIdRef.current);
+            const targetAccount = activeTodo?.linkedAccountId || currentActiveTaskIdRef.current || '未分配时间 (Unallocated)';
+            newAccounts[targetAccount] = (newAccounts[targetAccount] || 0) + 1;
+          } else if (currentPomodoroStateRef.current === 'break') {
+            newAccounts['休息时间 (Rest Time)'] = (newAccounts['休息时间 (Rest Time)'] || 0) + 1;
+          }
+          return newAccounts;
+        });
+      } else if (type === 'done') {
+        // Time has run out, switch phase
+        if (currentPomodoroStateRef.current === 'focus') {
+          const stopTime = Date.now();
+          if (currentActiveTaskIdRef.current && phaseStartTimeRef.current) {
+            addTimeLogEntry({
+              type: 'timer',
+              taskId: currentActiveTaskIdRef.current,
+              startTime: phaseStartTimeRef.current,
+              endTime: stopTime,
+            });
+          }
+          phaseStartTimeRef.current = stopTime;
+          setPomodoroState('break');
+          setPomodoroRemainingTime(pomodoroSettings.breakTime);
+          showNotification('专注时间结束！', '现在是休息时间。');
+          timerWorkerRef.current?.postMessage({ command: 'start', value: pomodoroSettings.breakTime });
+        } else if (currentPomodoroStateRef.current === 'break') {
+          const stopTime = Date.now();
+          if (phaseStartTimeRef.current) {
+            addTimeLogEntry({
+              type: 'timer',
+              taskId: '休息时间 (Rest Time)',
+              startTime: phaseStartTimeRef.current,
+              endTime: stopTime,
+            });
+          }
+          phaseStartTimeRef.current = null;
+          setPomodoroState('idle');
+          setPomodoroRemainingTime(0);
+          setActiveTaskId(null);
+          activeTaskAtPhaseStartRef.current = null;
+          initialTimeAtPhaseStartRef.current = 0;
+          showNotification('休息时间结束！', '准备开始下一个专注。');
+        }
+      }
+    };
+    
+    // Cleanup on component unmount
+    return () => {
+      timerWorkerRef.current?.terminate();
+    };
+  }, []); // Empty dependency array, run once on mount
+
   // 显示指导模态框
   const [showOnboarding, setShowOnboarding] = useState<boolean>(false);
   // 每个时间单位的树木增长视觉效果
@@ -140,10 +239,12 @@ const AppContent: React.FC = () => {
 
   // 导航栏当前视图
   const [currentView, setCurrentView] = useState<'timerTodo' | 'accountTransfer' | 'monuments' | 'settings' | 'timeLog'>('timerTodo'); // 默认为计时与待办界面
+  const [todoViewMode, setTodoViewMode] = useState<'visual' | 'text'>('visual');
 
   // 新增：通知权限状态
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>('default');
   const [theme, setTheme] = useState(localStorage.getItem('theme') || 'system');
+  const [isAlwaysOnTop, setIsAlwaysOnTop] = useState(false);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -233,93 +334,6 @@ const AppContent: React.FC = () => {
     }
   };
 
-  // 计时器效果的核心逻辑 (每秒更新)
-  useEffect(() => {
-    // 只有当有活跃任务且番茄钟不处于空闲状态时，才设置计时器
-    if (activeTaskId && pomodoroState !== 'idle') {
-      console.log('Starting timer with:', { activeTaskId, pomodoroState });
-      
-      timerRef.current = setInterval(() => {
-        // 时间累加逻辑
-        setTimeAccounts((prevAccounts) => {
-          const newAccounts = { ...prevAccounts };
-          if (currentPomodoroStateRef.current === 'focus') {
-            const targetAccount = currentActiveTaskIdRef.current || '未分配时间 (Unallocated)';
-            newAccounts[targetAccount] = (newAccounts[targetAccount] || 0) + 1;
-          } else if (currentPomodoroStateRef.current === 'break') {
-            newAccounts['休息时间 (Rest Time)'] = (newAccounts['休息时间 (Rest Time)'] || 0) + 1;
-          }
-          return newAccounts;
-        });
-
-        // 计时器递减和阶段切换逻辑
-        setPomodoroRemainingTime((prevTime) => {
-          if (prevTime <= 1) {
-            // 时间耗尽，切换阶段
-            if (currentPomodoroStateRef.current === 'focus') {
-              const stopTime = Date.now();
-              if (currentActiveTaskIdRef.current && phaseStartTimeRef.current) {
-                    addTimeLogEntry({
-                       type: 'timer',
-                       taskId: currentActiveTaskIdRef.current,
-                       startTime: phaseStartTimeRef.current,
-                       endTime: stopTime,
-                    });
-                  }
-
-              phaseStartTimeRef.current = stopTime;
-
-              setPomodoroState('break');
-              setPomodoroRemainingTime(pomodoroSettings.breakTime);
-              showNotification('专注时间结束！', '现在是休息时间。');
-            } else if (currentPomodoroStateRef.current === 'break') {
-              const stopTime = Date.now();
-              if (phaseStartTimeRef.current) {
-                if (phaseStartTimeRef.current) {
-                      addTimeLogEntry({
-                         type: 'timer',
-                         taskId: '休息时间 (Rest Time)',
-                         startTime: phaseStartTimeRef.current,
-                         endTime: stopTime,
-                      });
-                    }
-              }
-              phaseStartTimeRef.current = null;
-              
-              setPomodoroState('idle');
-              setPomodoroRemainingTime(0);
-              setActiveTaskId(null);
-              activeTaskAtPhaseStartRef.current = null;
-              initialTimeAtPhaseStartRef.current = 0;
-              showNotification('休息时间结束！', '准备开始下一个专注。');
-            }
-            
-            // 阶段切换后，当前计时器完成其使命，可以被清除
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
-            return 0;
-          }
-          return prevTime - 1;
-        });
-      }, 1000);
-    }
-
-    // 清理函数：这是此 effect 的核心。
-    // 它在组件卸载或依赖项 (activeTaskId, pomodoroState) 改变时运行
-    // 确保任何旧的计时器都被彻底清除
-    return () => {
-      if (timerRef.current) {
-        console.log('Cleaning up timer ID:', timerRef.current);
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-    };
-    
-  // 依赖项：只有当 activeTaskId 或 pomodoroState 改变时，才重新运行此 effect
-  }, [activeTaskId, pomodoroState]);
-
-
   // 处理开始番茄钟
   const handleStartPomodoro = (taskId: string) => {
     // 如果已有活跃任务，先停止当前计时，避免时间混乱
@@ -335,16 +349,14 @@ const AppContent: React.FC = () => {
 
     setActiveTaskId(taskId); // 设置当前活跃任务
     setPomodoroState('focus'); // 进入专注模式
-    setPomodoroRemainingTime(pomodoroSettings.focusTime); // 设置专注时间
+    const focusTime = pomodoroSettings.focusTime;
+    setPomodoroRemainingTime(focusTime); // 设置专注时间
+    timerWorkerRef.current?.postMessage({ command: 'start', value: focusTime });
   };
 
   // 处理停止番茄钟（正常停止或切换任务）
   const handleStopPomodoro = () => {
-    // 清除计时器
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
+    timerWorkerRef.current?.postMessage({ command: 'stop' });
 
     const stopTime = Date.now();
     const startTime = phaseStartTimeRef.current;
@@ -378,23 +390,9 @@ const AppContent: React.FC = () => {
     initialTimeAtPhaseStartRef.current = 0;   // 重置初始时间
   };
 
-  // 新增：快进当前阶段（用于调试或快速跳过当前阶段）
-  // 此时已累积的时间会保留在原账户
-  const handleFastForward = () => {
-    if (currentPomodoroStateRef.current !== 'idle') {
-      setPomodoroRemainingTime(1); // 将剩余时间设置为1秒，强制在下一次更新时触发阶段结束
-      // 注意：这里不需要额外操作 timeAccounts，因为每秒更新逻辑已经处理了累加。
-      // 阶段结束时，时间已经正确地累积在目标账户中。
-    }
-  };
-
   // 新增：重新开始番茄钟（完全重置，已投入时间计入"默认损失"）
   const handleRestartPomodoro = () => {
-    // 停止计时器
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
+    timerWorkerRef.current?.postMessage({ command: 'stop' });
 
     // 获取当前阶段被中断的任务ID
     const interruptedTask = activeTaskAtPhaseStartRef.current;
@@ -428,10 +426,15 @@ const AppContent: React.FC = () => {
   };
 
   // 添加待办任务
-  const addTodo = (text: string) => {
+  const addTodo = (text: string, parentId: string | null = null, linkedAccountId?: string) => {
     const newId = `Todo-${Date.now()}`;
-    setTodos(prevTodos => [...prevTodos, { id: newId, text, isCompleted: false }]);
-    setTimeAccounts(prevAccounts => ({ ...prevAccounts, [newId]: 0 }));
+    const newTodo: Todo = { id: newId, text, isCompleted: false, parentId, linkedAccountId };
+    setTodos(prevTodos => [...prevTodos, newTodo]);
+    // Only create a new time account entry if it's not a linked todo
+    if (!linkedAccountId) {
+      setTimeAccounts(prevAccounts => ({ ...prevAccounts, [newId]: 0 }));
+    }
+    return newId; // Explicitly return the new todo's ID
   };
 
   const completeTodo = (todoId: string) => {
@@ -446,17 +449,142 @@ const AppContent: React.FC = () => {
     }
   };
 
-  // 删除待办任务
+  // 删除待办任务 (包括所有子任务)
   const deleteTodo = (id: string) => {
-    setTodos(todos.filter(todo => todo.id !== id)); // 从待办列表中移除
+    // Find all children and grand-children recursively
+    const idsToDelete = [id];
+    const findChildren = (parentId: string) => {
+      todos.forEach(todo => {
+        if (todo.parentId === parentId) {
+          idsToDelete.push(todo.id);
+          findChildren(todo.id);
+        }
+      });
+    };
+    findChildren(id);
+
+    // Stop timer if any of the deleted todos were the active one
+    if (idsToDelete.includes(currentActiveTaskIdRef.current || '')) {
+      handleStopPomodoro();
+    }
+
+    // Filter out all todos to be deleted
+    setTodos(prevTodos => prevTodos.filter(todo => !idsToDelete.includes(todo.id)));
+
+    // Remove the corresponding time accounts
     setTimeAccounts((prevAccounts) => {
       const newAccounts = { ...prevAccounts };
-      delete newAccounts[id]; // 从时间账户中删除对应账户
+      idsToDelete.forEach(deletedId => {
+        delete newAccounts[deletedId];
+      });
       return newAccounts;
     });
-    if (currentActiveTaskIdRef.current === id) {
-      handleStopPomodoro(); // 如果删除的是当前活跃任务，则停止计时
-    }
+  };
+
+  const moveTodo = (draggableId: string, newParentId: string | null, targetId: string | null) => {
+    setTodos(currentTodos => {
+      const newTodos = [...currentTodos];
+
+      const draggedSubtree: Todo[] = [];
+      const idMap = new Map(newTodos.map(t => [t.id, t]));
+
+      const findDescendantsRecursive = (id: string) => {
+        const todo = idMap.get(id);
+        if (todo) {
+          draggedSubtree.push(todo);
+          const children = newTodos.filter(t => t.parentId === id);
+          children.forEach(child => findDescendantsRecursive(child.id));
+        }
+      };
+      findDescendantsRecursive(draggableId);
+
+      if (draggedSubtree.length === 0) {
+        return currentTodos;
+      }
+
+      const subtreeIds = new Set(draggedSubtree.map(t => t.id));
+      const remainingTodos = newTodos.filter(t => !subtreeIds.has(t.id));
+
+      const draggedItem = draggedSubtree[0];
+      draggedItem.parentId = newParentId;
+
+      let insertionIndex = -1;
+      if (targetId) {
+        insertionIndex = remainingTodos.findIndex(t => t.id === targetId);
+      } else if (newParentId) {
+        const parentSubtreeIds = new Set<string>();
+        const findParentDescendants = (id: string) => {
+          parentSubtreeIds.add(id);
+          const children = remainingTodos.filter(t => t.parentId === id);
+          children.forEach(child => findParentDescendants(child.id));
+        };
+        findParentDescendants(newParentId);
+        
+        let lastIndexOfParentSubtree = -1;
+        for (let i = remainingTodos.length - 1; i >= 0; i--) {
+          if (parentSubtreeIds.has(remainingTodos[i].id)) {
+            lastIndexOfParentSubtree = i;
+            break;
+          }
+        }
+        insertionIndex = lastIndexOfParentSubtree + 1;
+      }
+
+      if (insertionIndex !== -1 && insertionIndex < remainingTodos.length) {
+        remainingTodos.splice(insertionIndex, 0, ...draggedSubtree);
+      } else {
+        remainingTodos.push(...draggedSubtree);
+      }
+      
+      return remainingTodos;
+    });
+  };
+
+  const reorderAccounts = (startIndex: number, endIndex: number) => {
+    const result = Array.from(accountOrder);
+    const [removed] = result.splice(startIndex, 1);
+    result.splice(endIndex, 0, removed);
+    setAccountOrder(result);
+  };
+
+  const transferTime = (fromAccount: string, toAccount: string, transferAmount: number) => {
+    setTimeAccounts((prevAccounts) => {
+      const newAccounts = { ...prevAccounts };
+      newAccounts[fromAccount] -= transferAmount;
+      newAccounts[toAccount] = (newAccounts[toAccount] || 0) + transferAmount;
+      return newAccounts;
+    });
+
+    addTimeLogEntry({
+      type: 'transfer',
+      fromAccount,
+      toAccount,
+      transferAmount
+    });
+  };
+
+  // Helper function to allow replacing the entire todos array, useful for text parsing.
+  const replaceTodos = (newTodos: Todo[]) => {
+    setTodos(newTodos);
+
+    // Also update time accounts to match the new set of todos
+    const newAccountKeys = newTodos.map(t => t.id);
+    setTimeAccounts(prevAccounts => {
+        const updatedAccounts = { ...prevAccounts };
+        // Remove accounts for deleted todos
+        Object.keys(prevAccounts).forEach(key => {
+            if (key.startsWith('Todo-') && !newAccountKeys.includes(key)) {
+                delete updatedAccounts[key];
+            }
+        });
+        // Add accounts for new todos
+        newTodos.forEach(todo => {
+            if (updatedAccounts[todo.id] === undefined) {
+                updatedAccounts[todo.id] = 0;
+            }
+        });
+        return updatedAccounts;
+    });
   };
 
   // 添加纪念碑子科目（供 MonumentsView 调用）
@@ -469,7 +597,6 @@ const AppContent: React.FC = () => {
     setTimeAccounts((prevAccounts) => ({ ...prevAccounts, [monumentId]: 0 }));
     return true;
   };
-
 
   // 格式化时间显示 (秒 -> 小时:分钟:秒)
   const formatTime = (seconds: number): string => {
@@ -581,6 +708,26 @@ const AppContent: React.FC = () => {
     setCompletedMonuments(prev => [...prev, monumentId]);
   };
   
+  // Helper functions for account types and display names
+  const getAccountType = (accountName: string): string => {
+    if (accountName.startsWith('Todo-')) return 'todo';
+    if (accountName.startsWith('纪念碑 -')) return 'monument';
+    if (['未分配时间 (Unallocated)', '休息时间 (Rest Time)', '无效消耗 (Wasted Time)', '默认损失 (Default Loss)'].includes(accountName)) return 'system';
+    return 'general';
+  };
+
+  const isManageable = (accountName: string): boolean => {
+    const type = getAccountType(accountName);
+    return type === 'todo' || type === 'general';
+  };
+
+  const getAccountDisplayName = (accountName: string): string => {
+    if (getAccountType(accountName) === 'todo') {
+        return todos.find(t => t.id === accountName)?.text || accountName;
+    }
+    return accountName;
+  };
+
   const renameAccount = (oldName: string, newName: string) => {
     const trimmedNewName = newName.trim();
     if (!trimmedNewName) {
@@ -611,6 +758,9 @@ const AppContent: React.FC = () => {
       newAccounts[trimmedNewName] = accountValue;
       return newAccounts;
     });
+
+    // 更新 accountOrder 状态
+    setAccountOrder(prevOrder => prevOrder.map(key => key === oldName ? trimmedNewName : key));
 
     // 如果被重命名的账户是当前活动任务，则更新活动任务ID
     if (activeTaskId === oldName) {
@@ -646,6 +796,9 @@ const AppContent: React.FC = () => {
         return newAccounts;
       });
       
+      // 从顺序中删除
+      setAccountOrder(prevOrder => prevOrder.filter(key => key !== accountName));
+
       // 如果删除的是当前活动任务，则停止计时
       if (activeTaskId === accountName) {
         handleStopPomodoro();
@@ -659,31 +812,43 @@ const AppContent: React.FC = () => {
     );
   };
 
-  const isManageable = (accountName: string): boolean => {
-    const type = getAccountType(accountName);
-    return type === 'todo' || type === 'general';
+  const convertToTodo = (accountName: string) => {
+    // Create a new todo, linking it to the original account.
+    // The time accumulation will now happen directly on the original account via linkedAccountId.
+    addTodo(accountName, null, accountName); // text, parentId, linkedAccountId
+    // No need to transfer time or delete the original account, as it remains the target for time accumulation.
   };
 
-  const getAccountDisplayName = (accountName: string): string => {
-    if (getAccountType(accountName) === 'todo') {
-        return todos.find(t => t.id === accountName)?.text || accountName;
+  const addAccount = (name: string, type: 'general' | 'monument'): boolean => {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      showAlert('创建失败', '账户名称不能为空。');
+      return false;
     }
-    return accountName;
+
+    let accountKey = trimmedName;
+    if (type === 'monument') {
+      // Reuse existing logic for monument accounts
+      return addMonumentAccount(trimmedName);
+    }
+
+    if (timeAccounts[accountKey] !== undefined) {
+      showAlert('创建失败', `账户 "${trimmedName}" 已存在！`);
+      return false;
+    }
+
+    setTimeAccounts(prevAccounts => ({
+      ...prevAccounts,
+      [accountKey]: 0,
+    }));
+    setAccountOrder(prevOrder => [...prevOrder, accountKey]);
+    showAlert('创建成功', `账户 "${trimmedName}" 已成功创建。`);
+    return true;
   };
 
-  // Helper functions that need access to App's state (todos)
-  const getAccountType = (accountName: string): string => {
-    if (accountName.startsWith('Todo-')) return 'todo';
-    if (accountName.startsWith('纪念碑 -')) return 'monument';
-    if (['未分配时间 (Unallocated)', '休息时间 (Rest Time)', '无效消耗 (Wasted Time)', '默认损失 (Default Loss)'].includes(accountName)) return 'system';
-    return 'general';
-  };
-
-  const reorderTodos = (startIndex: number, endIndex: number) => {
-    const result = Array.from(todos);
-    const [removed] = result.splice(startIndex, 1);
-    result.splice(endIndex, 0, removed);
-    setTodos(result);
+  const handleToggleAlwaysOnTop = (isAlwaysOnTop: boolean) => {
+    setIsAlwaysOnTop(isAlwaysOnTop);
+    ipcRenderer.send('toggle-always-on-top', isAlwaysOnTop);
   };
 
   return (
@@ -750,30 +915,44 @@ const AppContent: React.FC = () => {
               pomodoroRemainingTime={pomodoroRemainingTime}
               onStartPomodoro={handleStartPomodoro}
               onStopPomodoro={handleStopPomodoro}
-              handleFastForward={handleFastForward}
               handleRestartPomodoro={handleRestartPomodoro}
-              todos={todos.filter(todo => !todo.isCompleted)}
+              todos={todos}
               addTodo={addTodo}
               deleteTodo={deleteTodo}
               completeTodo={completeTodo}
               renameTodo={renameTodo}
               onboarding={() => setShowOnboarding(true)}
-              reorderTodos={reorderTodos}
+              moveTodo={moveTodo}
+              todoViewMode={todoViewMode}
+              setTodoViewMode={setTodoViewMode}
+              replaceTodos={replaceTodos}
+              showConfirm={showConfirm}
+              convertToTodo={convertToTodo}
+              timeAccounts={timeAccounts}
+              formatTime={formatTime}
+              getAccountType={getAccountType}
+              getAccountDisplayName={getAccountDisplayName}
+              isManageable={isManageable}
             />
           )}
 
           {currentView === 'accountTransfer' && (
             <AccountTransferView
-              allAccountNames={Object.keys(timeAccounts)}
+              accountOrder={accountOrder}
+              timeAccounts={timeAccounts}
               todos={todos}
               renameAccount={renameAccount}
               deleteAccount={deleteAccount}
-              addTimeLogEntry={addTimeLogEntry}
+              transferTime={transferTime}
+              formatTime={formatTime}
               completedMonuments={completedMonuments}
               archiveMonument={archiveMonument}
               getAccountType={getAccountType}
               getAccountDisplayName={getAccountDisplayName}
               isManageable={isManageable}
+              reorderAccounts={reorderAccounts}
+              convertToTodo={convertToTodo}
+              addAccount={addAccount}
             />
           )}
 
@@ -800,6 +979,8 @@ const AppContent: React.FC = () => {
               onImport={handleImportData}
               theme={theme}
               setTheme={setTheme}
+              isAlwaysOnTop={isAlwaysOnTop}
+              onToggleAlwaysOnTop={handleToggleAlwaysOnTop}
             />
           )}
         </main>

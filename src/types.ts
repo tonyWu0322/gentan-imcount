@@ -11,6 +11,8 @@ export interface Todo {
   id: string;
   text: string;
   isCompleted: boolean;
+  parentId?: string | null;
+  linkedAccountId?: string;
 }
 
 export interface TimeLog {
